@@ -1,0 +1,122 @@
+#!/usr/bin/env ruby
+
+$DEBUG=nil
+
+require 'logger'
+require 'savon'
+require 'json'
+
+JSONFILE = "impress.json"
+LOG = Logger.new(STDERR)
+LOG.level = Logger::DEBUG
+HTTPI.logger = LOG
+PARANOID = false
+
+module Nokogiri
+  module XML
+    class Node
+      def content_value()
+        if self.content.empty?
+          return nil
+        elsif self.content == 'false'
+          return false
+        elsif self.content == 'true'
+          return true
+        else
+          return self.content
+        end
+      end
+      def collapse()
+        result = inner_collapse
+        return result ? (result.kind_of?(Array) ? result : [result]) : []
+      end
+      def inner_collapse()
+        case element_children.size
+        when 0
+          return self.content_value
+        when 1
+          return first_element_child.inner_collapse
+        else
+          array = []
+          hash = {}
+          self.element_children.each do |c|
+            if c.name == "item" && !c.xpath('key').empty? && !c.xpath('value').empty?
+              hash[c.xpath('key')[0].content.to_sym] = c.xpath('value')[0].content_value
+            else
+              array << c.inner_collapse
+            end
+          end
+          raise Exception.new "hashy and non-hashy" if !hash.empty? && !array.empty?
+          return (!hash.empty?) ? hash : array
+        end
+      end
+    end
+  end
+end
+
+module Savon
+  RETRY_INTERVAL = 10
+  class Client
+    def impress_call(cmd, message=nil)
+      response = nil
+      while !response
+        begin
+          response = self.call(cmd, message: message)
+        rescue HTTPError => e
+          LOG.warn "Got HTTP Error #{e}; retrying in #{RETRY_INTERVAL}"
+          sleep RETRY_INTERVAL
+        end
+      end
+      return response.doc.collapse
+    end
+  end
+end
+
+data = {}
+client = Savon.client(wsdl: "https://www.mousephenotype.org/impress/soap/server?wsdl", logger: LOG, pretty_print_xml: true)
+data[:when_last_modified] = client.impress_call(:get_when_last_modified)[0]
+
+if File.exists? JSONFILE
+  existing = DateTime.parse(JSON.parse(File.read(JSONFILE))['when_last_modified'])
+  if DateTime.parse(data[:when_last_modified]) > existing
+    File.rename(JSONFILE, "#{JSONFILE}.#{existing.to_s}")
+    LOG.info "Current JSON file out of date (#{data[:when_last_modified]} > #{existing.to_s}); reconverting impress database"
+  else
+    LOG.info "Current JSON file is up to date (#{existing.to_s})"
+    exit
+  end
+else
+  LOG.info "No existing JSON file; creating"
+end
+
+LOG.debug client.operations
+client.impress_call(:get_pipeline_keys).each do |k|
+  pipeline_key = k.to_sym
+  LOG.info "Getting procedure keys for pipeline #{pipeline_key}"
+  data[pipeline_key] = client.impress_call(:get_pipeline, pipeline_key: pipeline_key)[0]
+  data[pipeline_key][:procedures] = []
+  client.impress_call(:get_procedure_keys, pipeline_key: pipeline_key).each do |k|
+    procedure_key = k.to_sym
+    data[pipeline_key][:procedures] << procedure_key
+    if !data.include? procedure_key
+      procedure_key = procedure_key.to_sym
+      LOG.info "Getting parameters for #{procedure_key}"
+      data[procedure_key] = client.impress_call(:get_procedure, procedure_key: procedure_key)[0]
+      data[procedure_key][:parameters] = []
+      client.impress_call(:get_parameters, procedure_key: procedure_key).each do |param|
+        parameter_key = param[:parameter_key].to_sym
+        data[procedure_key][:parameters] << parameter_key
+        if PARANOID || !data.include?(parameter_key)
+          message = {parameter_key: parameter_key}
+          param[:increments] = client.impress_call(:get_parameter_increments, message)
+          param[:options] = client.impress_call(:get_parameter_options, message)
+          param[:mp_terms] = client.impress_call(:get_parameter_mp_terms, message)
+          param[:eq_terms] = client.impress_call(:get_parameter_eq_terms, message)
+          raise Exception.new "differing values for duplicate parameter key #{parameter_key}" if data.include?(parameter_key) && data[parameter_key] != param
+          data[parameter_key] = param
+        end
+      end
+    end
+  end
+end
+File.new(JSONFILE, 'w').write(JSON::pretty_generate(data))
