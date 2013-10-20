@@ -6,9 +6,8 @@ require 'logger'
 require 'savon'
 require 'json'
 
-JSONFILE = "impress.json"
 LOG = Logger.new(STDERR)
-LOG.level = Logger::DEBUG
+LOG.level = Logger::INFO
 HTTPI.logger = LOG
 PARANOID = false
 
@@ -75,18 +74,11 @@ end
 data = {}
 client = Savon.client(wsdl: "https://www.mousephenotype.org/impress/soap/server?wsdl", logger: LOG, pretty_print_xml: true)
 data[:when_last_modified] = client.impress_call(:get_when_last_modified)[0]
+jsonfilename = "impress.#{data[:when_last_modified]}.json"
 
-if File.exists? JSONFILE
-  existing = DateTime.parse(JSON.parse(File.read(JSONFILE))['when_last_modified'])
-  if DateTime.parse(data[:when_last_modified]) > existing
-    File.rename(JSONFILE, "#{JSONFILE}.#{existing.to_s}")
-    LOG.info "Current JSON file out of date (#{data[:when_last_modified]} > #{existing.to_s}); reconverting impress database"
-  else
-    LOG.info "Current JSON file is up to date (#{existing.to_s})"
-    exit
-  end
-else
-  LOG.info "No existing JSON file; creating"
+if File.exists? jsonfilename
+  LOG.info "JSON file for current version (#{data[:when_last_modified]}) already exists; exiting"
+  exit
 end
 
 LOG.debug client.operations
@@ -119,4 +111,7 @@ client.impress_call(:get_pipeline_keys).each do |k|
     end
   end
 end
-File.new(JSONFILE, 'w').write(JSON::pretty_generate(data))
+
+File.new(jsonfilename, 'w').write(JSON::pretty_generate(data))
+File.unlink "impress.json" if File.symlink? "impress.json"
+File.symlink(jsonfilename, "impress.json") if !File.exists? "impress.json"
