@@ -113,6 +113,12 @@ client.call(:get_pipeline_keys).each do |k|
   end
 end
 
+when_last_modified = client.call(:get_when_last_modified)[0]
+if when_last_modified != data[:when_last_modified]
+  LOG.error "Database was modified while we downloaded it! Aborting."
+  exit
+end
+
 File.new(jsonfilename, 'w').write(JSON::pretty_generate(data))
 File.unlink "impress.json" if File.symlink? "impress.json"
 File.symlink(jsonfilename, "impress.json") if !File.exists? "impress.json"
