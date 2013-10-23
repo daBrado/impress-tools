@@ -53,14 +53,15 @@ module Nokogiri
   end
 end
 
-module Savon
+module IMPReSS
+  extend self
   RETRY_INTERVAL = 10
-  class Client
-    def impress_call(cmd, message=nil)
+  class Client < Savon::Client
+    def call(cmd, message=nil)
       response = nil
       while !response
         begin
-          response = self.call(cmd, message: message)
+          response = super(cmd, message: message)
         rescue HTTPError => e
           LOG.warn "Got HTTP Error #{e}; retrying in #{RETRY_INTERVAL}"
           sleep RETRY_INTERVAL
@@ -72,8 +73,8 @@ module Savon
 end
 
 data = {}
-client = Savon.client(wsdl: "https://www.mousephenotype.org/impress/soap/server?wsdl", logger: LOG, pretty_print_xml: true)
-data[:when_last_modified] = client.impress_call(:get_when_last_modified)[0]
+client = IMPReSS::Client.new(wsdl: "https://www.mousephenotype.org/impress/soap/server?wsdl", logger: LOG, pretty_print_xml: true)
+data[:when_last_modified] = client.call(:get_when_last_modified)[0]
 jsonfilename = "impress.#{data[:when_last_modified]}.json"
 
 if File.exists? jsonfilename
@@ -82,28 +83,28 @@ if File.exists? jsonfilename
 end
 
 LOG.debug client.operations
-client.impress_call(:get_pipeline_keys).each do |k|
+client.call(:get_pipeline_keys).each do |k|
   pipeline_key = k.to_sym
   LOG.info "Getting procedure keys for pipeline #{pipeline_key}"
-  data[pipeline_key] = client.impress_call(:get_pipeline, pipeline_key: pipeline_key)[0]
+  data[pipeline_key] = client.call(:get_pipeline, pipeline_key: pipeline_key)[0]
   data[pipeline_key][:procedures] = []
-  client.impress_call(:get_procedure_keys, pipeline_key: pipeline_key).each do |k|
+  client.call(:get_procedure_keys, pipeline_key: pipeline_key).each do |k|
     procedure_key = k.to_sym
     data[pipeline_key][:procedures] << procedure_key
     if !data.include? procedure_key
       procedure_key = procedure_key.to_sym
       LOG.info "Getting parameters for #{procedure_key}"
-      data[procedure_key] = client.impress_call(:get_procedure, procedure_key: procedure_key)[0]
+      data[procedure_key] = client.call(:get_procedure, procedure_key: procedure_key)[0]
       data[procedure_key][:parameters] = []
-      client.impress_call(:get_parameters, procedure_key: procedure_key).each do |param|
+      client.call(:get_parameters, procedure_key: procedure_key).each do |param|
         parameter_key = param[:parameter_key].to_sym
         data[procedure_key][:parameters] << parameter_key
         if PARANOID || !data.include?(parameter_key)
           message = {parameter_key: parameter_key}
-          param[:increments] = client.impress_call(:get_parameter_increments, message)
-          param[:options] = client.impress_call(:get_parameter_options, message)
-          param[:mp_terms] = client.impress_call(:get_parameter_mp_terms, message)
-          param[:eq_terms] = client.impress_call(:get_parameter_eq_terms, message)
+          param[:increments] = client.call(:get_parameter_increments, message)
+          param[:options] = client.call(:get_parameter_options, message)
+          param[:mp_terms] = client.call(:get_parameter_mp_terms, message)
+          param[:eq_terms] = client.call(:get_parameter_eq_terms, message)
           raise Exception.new "differing values for duplicate parameter key #{parameter_key}" if data.include?(parameter_key) && data[parameter_key] != param
           data[parameter_key] = param
         end
