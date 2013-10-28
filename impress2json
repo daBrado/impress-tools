@@ -6,9 +6,9 @@ require 'logger'
 require 'savon'
 require 'json'
 
-LOG = Logger.new(STDERR)
-LOG.level = Logger::INFO
-HTTPI.logger = LOG
+SAVON_LOG = Logger.new(STDERR)
+SAVON_LOG.level = Logger::WARN
+HTTPI.logger = SAVON_LOG
 
 module Nokogiri
   module XML
@@ -55,9 +55,11 @@ end
 module IMPReSS
   extend self
   WSDL = "https://www.mousephenotype.org/impress/soap/server?wsdl"
-  RECHECK_INTERVAL = 180
+  RECHECK_INTERVAL = 360
   RETRY_INTERVAL = 10
   PARANOID = false
+  LOG = Logger.new STDERR
+  LOG.level = Logger::INFO
 
   class Client < Savon::Client
     def call(cmd, message=nil)
@@ -76,17 +78,18 @@ module IMPReSS
 
   def update()
     data = {}
-    client = IMPReSS::Client.new(wsdl: WSDL, logger: LOG, pretty_print_xml: true)
+    client = IMPReSS::Client.new(wsdl: WSDL, logger: SAVON_LOG, pretty_print_xml: true)
     data[:when_last_modified] = client.call(:get_when_last_modified)[0]
     jsonfilename = "impress.#{data[:when_last_modified]}.json"
     if File.exists? jsonfilename
       LOG.info "JSON file for current version (#{data[:when_last_modified]}) already exists; no update needed"
       return
     end
+    LOG.info "Proceeding to download updated IMPReSS database"
     LOG.debug client.operations
     client.call(:get_pipeline_keys).each do |k|
       pipeline_key = k.to_sym
-      LOG.info "Getting procedure keys for pipeline #{pipeline_key}"
+      LOG.debug "Getting procedure keys for pipeline #{pipeline_key}"
       data[pipeline_key] = client.call(:get_pipeline, pipeline_key: pipeline_key)[0]
       data[pipeline_key][:procedures] = []
       client.call(:get_procedure_keys, pipeline_key: pipeline_key).each do |k|
@@ -94,7 +97,7 @@ module IMPReSS
         data[pipeline_key][:procedures] << procedure_key
         if !data.include? procedure_key
           procedure_key = procedure_key.to_sym
-          LOG.info "Getting parameters for #{procedure_key}"
+          LOG.debug "Getting parameters for #{procedure_key}"
           data[procedure_key] = client.call(:get_procedure, procedure_key: procedure_key)[0]
           data[procedure_key][:parameters] = []
           client.call(:get_parameters, procedure_key: procedure_key).each do |param|
@@ -121,6 +124,7 @@ module IMPReSS
     else
       LOG.error "Database was modified while we downloaded it! Aborting."
     end
+    LOG.info "IMPReSS database download complete"
   end
 
   def daemon()
