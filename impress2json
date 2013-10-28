@@ -9,7 +9,6 @@ require 'json'
 LOG = Logger.new(STDERR)
 LOG.level = Logger::INFO
 HTTPI.logger = LOG
-PARANOID = false
 
 module Nokogiri
   module XML
@@ -55,14 +54,17 @@ end
 
 module IMPReSS
   extend self
+  WSDL = "https://www.mousephenotype.org/impress/soap/server?wsdl"
   RETRY_INTERVAL = 10
+  PARANOID = false
+
   class Client < Savon::Client
     def call(cmd, message=nil)
       response = nil
       while !response
         begin
           response = super(cmd, message: message)
-        rescue HTTPError => e
+        rescue Savon::HTTPError => e
           LOG.warn "Got HTTP Error #{e}; retrying in #{RETRY_INTERVAL}"
           sleep RETRY_INTERVAL
         end
@@ -70,55 +72,55 @@ module IMPReSS
       return response.doc.collapse
     end
   end
-end
 
-data = {}
-client = IMPReSS::Client.new(wsdl: "https://www.mousephenotype.org/impress/soap/server?wsdl", logger: LOG, pretty_print_xml: true)
-data[:when_last_modified] = client.call(:get_when_last_modified)[0]
-jsonfilename = "impress.#{data[:when_last_modified]}.json"
-
-if File.exists? jsonfilename
-  LOG.info "JSON file for current version (#{data[:when_last_modified]}) already exists; exiting"
-  exit
-end
-
-LOG.debug client.operations
-client.call(:get_pipeline_keys).each do |k|
-  pipeline_key = k.to_sym
-  LOG.info "Getting procedure keys for pipeline #{pipeline_key}"
-  data[pipeline_key] = client.call(:get_pipeline, pipeline_key: pipeline_key)[0]
-  data[pipeline_key][:procedures] = []
-  client.call(:get_procedure_keys, pipeline_key: pipeline_key).each do |k|
-    procedure_key = k.to_sym
-    data[pipeline_key][:procedures] << procedure_key
-    if !data.include? procedure_key
-      procedure_key = procedure_key.to_sym
-      LOG.info "Getting parameters for #{procedure_key}"
-      data[procedure_key] = client.call(:get_procedure, procedure_key: procedure_key)[0]
-      data[procedure_key][:parameters] = []
-      client.call(:get_parameters, procedure_key: procedure_key).each do |param|
-        parameter_key = param[:parameter_key].to_sym
-        data[procedure_key][:parameters] << parameter_key
-        if PARANOID || !data.include?(parameter_key)
-          message = {parameter_key: parameter_key}
-          param[:increments] = client.call(:get_parameter_increments, message)
-          param[:options] = client.call(:get_parameter_options, message)
-          param[:mp_terms] = client.call(:get_parameter_mp_terms, message)
-          param[:eq_terms] = client.call(:get_parameter_eq_terms, message)
-          raise Exception.new "differing values for duplicate parameter key #{parameter_key}" if data.include?(parameter_key) && data[parameter_key] != param
-          data[parameter_key] = param
+  def update()
+    data = {}
+    client = IMPReSS::Client.new(wsdl: WSDL, logger: LOG, pretty_print_xml: true)
+    data[:when_last_modified] = client.call(:get_when_last_modified)[0]
+    jsonfilename = "impress.#{data[:when_last_modified]}.json"
+    if File.exists? jsonfilename
+      LOG.info "JSON file for current version (#{data[:when_last_modified]}) already exists; exiting"
+      exit
+    end
+    LOG.debug client.operations
+    client.call(:get_pipeline_keys).each do |k|
+      pipeline_key = k.to_sym
+      LOG.info "Getting procedure keys for pipeline #{pipeline_key}"
+      data[pipeline_key] = client.call(:get_pipeline, pipeline_key: pipeline_key)[0]
+      data[pipeline_key][:procedures] = []
+      client.call(:get_procedure_keys, pipeline_key: pipeline_key).each do |k|
+        procedure_key = k.to_sym
+        data[pipeline_key][:procedures] << procedure_key
+        if !data.include? procedure_key
+          procedure_key = procedure_key.to_sym
+          LOG.info "Getting parameters for #{procedure_key}"
+          data[procedure_key] = client.call(:get_procedure, procedure_key: procedure_key)[0]
+          data[procedure_key][:parameters] = []
+          client.call(:get_parameters, procedure_key: procedure_key).each do |param|
+            parameter_key = param[:parameter_key].to_sym
+            data[procedure_key][:parameters] << parameter_key
+            if PARANOID || !data.include?(parameter_key)
+              message = {parameter_key: parameter_key}
+              param[:increments] = client.call(:get_parameter_increments, message)
+              param[:options] = client.call(:get_parameter_options, message)
+              param[:mp_terms] = client.call(:get_parameter_mp_terms, message)
+              param[:eq_terms] = client.call(:get_parameter_eq_terms, message)
+              raise Exception.new "differing values for duplicate parameter key #{parameter_key}" if data.include?(parameter_key) && data[parameter_key] != param
+              data[parameter_key] = param
+            end
+          end
         end
       end
     end
+    when_last_modified = client.call(:get_when_last_modified)[0]
+    if when_last_modified != data[:when_last_modified]
+      LOG.error "Database was modified while we downloaded it! Aborting."
+      exit
+    end
+    File.new(jsonfilename, 'w').write(JSON::pretty_generate(data))
+    File.unlink "impress.json" if File.symlink? "impress.json"
+    File.symlink(jsonfilename, "impress.json") if !File.exists? "impress.json"
   end
 end
 
-when_last_modified = client.call(:get_when_last_modified)[0]
-if when_last_modified != data[:when_last_modified]
-  LOG.error "Database was modified while we downloaded it! Aborting."
-  exit
-end
-
-File.new(jsonfilename, 'w').write(JSON::pretty_generate(data))
-File.unlink "impress.json" if File.symlink? "impress.json"
-File.symlink(jsonfilename, "impress.json") if !File.exists? "impress.json"
+IMPReSS::update
