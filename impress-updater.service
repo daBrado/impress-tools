@@ -1,0 +1,11 @@
+[Unit]
+Description=IMPReSS JSON Updater
+
+[Service]
+User=braden
+Group=braden
+WorkingDirectory=/home/braden/prj/impress-tools
+ExecStart=/home/braden/prj/impress-tools/impress2json daemon
+
+[Install]
+WantedBy=multi-user.target
