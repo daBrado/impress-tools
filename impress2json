@@ -55,6 +55,7 @@ end
 module IMPReSS
   extend self
   WSDL = "https://www.mousephenotype.org/impress/soap/server?wsdl"
+  RECHECK_INTERVAL = 180
   RETRY_INTERVAL = 10
   PARANOID = false
 
@@ -65,7 +66,7 @@ module IMPReSS
         begin
           response = super(cmd, message: message)
         rescue Savon::HTTPError => e
-          LOG.warn "Got HTTP Error #{e}; retrying in #{RETRY_INTERVAL}"
+          LOG.warn "Got HTTP Error #{e}; retrying in #{RETRY_INTERVAL} seconds"
           sleep RETRY_INTERVAL
         end
       end
@@ -79,8 +80,8 @@ module IMPReSS
     data[:when_last_modified] = client.call(:get_when_last_modified)[0]
     jsonfilename = "impress.#{data[:when_last_modified]}.json"
     if File.exists? jsonfilename
-      LOG.info "JSON file for current version (#{data[:when_last_modified]}) already exists; exiting"
-      exit
+      LOG.info "JSON file for current version (#{data[:when_last_modified]}) already exists; no update needed"
+      return
     end
     LOG.debug client.operations
     client.call(:get_pipeline_keys).each do |k|
@@ -113,14 +114,29 @@ module IMPReSS
       end
     end
     when_last_modified = client.call(:get_when_last_modified)[0]
-    if when_last_modified != data[:when_last_modified]
+    if when_last_modified == data[:when_last_modified]
+      File.new(jsonfilename, 'w').write(JSON::pretty_generate(data))
+      File.unlink "impress.json" if File.symlink? "impress.json"
+      File.symlink(jsonfilename, "impress.json") if !File.exists? "impress.json"
+    else
       LOG.error "Database was modified while we downloaded it! Aborting."
-      exit
     end
-    File.new(jsonfilename, 'w').write(JSON::pretty_generate(data))
-    File.unlink "impress.json" if File.symlink? "impress.json"
-    File.symlink(jsonfilename, "impress.json") if !File.exists? "impress.json"
+  end
+
+  def daemon()
+    while true
+      update()
+      LOG.info "Waiting for #{RECHECK_INTERVAL} seconds before checking again"
+      sleep RECHECK_INTERVAL
+    end
   end
 end
 
-IMPReSS::update
+case ARGV[0]
+when "update"
+  IMPReSS::update
+when "daemon"
+  IMPReSS::daemon
+else
+  STDERR.puts "Usage: #{$0} update | daemon"
+end
