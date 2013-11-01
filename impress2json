@@ -57,7 +57,6 @@ module IMPReSS
   WSDL = "https://www.mousephenotype.org/impress/soap/server?wsdl"
   RECHECK_INTERVAL = 360
   RETRY_INTERVAL = 10
-  PARANOID = false
   LOG = Logger.new STDERR
   LOG.level = Logger::INFO
 
@@ -105,39 +104,46 @@ module IMPReSS
     end
     def get_pipelines()
       @client.call(:get_pipeline_keys).each do |k|
-        pipeline_key = k.to_sym
-        LOG.debug "Getting procedure keys for pipeline #{pipeline_key}"
-        @data[pipeline_key] = @client.call(:get_pipeline, pipeline_key: pipeline_key)[0]
-        @data[pipeline_key][:procedures] = []
-        get_procedures(pipeline_key)
+        get_pipeline(k.to_sym)
       end
     end
+    def get_pipeline(pipeline_key)
+      @data[pipeline_key] = @client.call(:get_pipeline, pipeline_key: pipeline_key)[0]
+      @data[pipeline_key][:procedures] = []
+      get_procedures(pipeline_key)
+    end
     def get_procedures(pipeline_key)
-      @client.call(:get_procedure_keys, pipeline_key: pipeline_key).each do |k|
-        procedure_key = k.to_sym
+      LOG.debug "Getting procedure keys for pipeline #{pipeline_key}"
+      @client.call(:get_procedures, pipeline_key: pipeline_key).each do |procedure|
+        procedure_key = procedure[:procedure_key].to_sym
         @data[pipeline_key][:procedures] << procedure_key
         if !@data.include? procedure_key
-          procedure_key = procedure_key.to_sym
-          LOG.debug "Getting parameters for #{procedure_key}"
-          @data[procedure_key] = @client.call(:get_procedure, procedure_key: procedure_key)[0]
+          LOG.debug "Recording procedure #{procedure_key}"
+          @data[procedure_key] = procedure
           get_parameters(procedure_key)
+        else
+          LOG.debug "Already found procedure #{procedure_key}"
         end
       end
     end
     def get_parameters(procedure_key)
       @data[procedure_key][:parameters] = []
-      @client.call(:get_parameters, procedure_key: procedure_key).each do |param|
-        parameter_key = param[:parameter_key].to_sym
-        @data[procedure_key][:parameters] << parameter_key
-        if PARANOID || !@data.include?(parameter_key)
-          message = {parameter_key: parameter_key}
-          param[:increments] = @client.call(:get_parameter_increments, message)
-          param[:options] = @client.call(:get_parameter_options, message)
-          param[:mp_terms] = @client.call(:get_parameter_mp_terms, message)
-          param[:eq_terms] = @client.call(:get_parameter_eq_terms, message)
-          raise Exception.new "differing values for duplicate parameter key #{parameter_key}" if @data.include?(parameter_key) && @data[parameter_key] != param
-          @data[parameter_key] = param
-        end
+      @client.call(:get_parameters, procedure_key: procedure_key).each do |parameter|
+        @data[procedure_key][:parameters] << parameter[:parameter_key].to_sym
+        add_parameter(parameter)
+      end
+    end
+    def add_parameter(parameter)
+      parameter_key = parameter[:parameter_key].to_sym
+      if !@data.include? parameter_key
+        LOG.debug "Recording parameter #{parameter_key}"
+        parameter[:increments] = @client.call(:get_parameter_increments, parameter_key: parameter_key)
+        parameter[:options] = @client.call(:get_parameter_options, parameter_key: parameter_key)
+        parameter[:mp_terms] = @client.call(:get_parameter_mp_terms, parameter_key: parameter_key)
+        parameter[:eq_terms] = @client.call(:get_parameter_eq_terms, parameter_key: parameter_key)
+        @data[parameter_key] = parameter
+      else
+        LOG.debug "Already found parameter #{parameter_key}"
       end
     end
   end
