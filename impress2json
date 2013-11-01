@@ -81,6 +81,7 @@ module IMPReSS
       @data = {}
       @client = nil
       @queue = Queue.new
+      @mutex = Mutex.new
     end
     def update()
       @data = {}
@@ -119,18 +120,19 @@ module IMPReSS
     end
     def get_pipeline(pipeline_key)
       LOG.debug "Getting pipeline #{pipeline_key}"
-      @data[pipeline_key] = @client.call(:get_pipeline, pipeline_key: pipeline_key)[0]
-      @data[pipeline_key][:procedures] = []
+      pipeline = @client.call(:get_pipeline, pipeline_key: pipeline_key)[0]
+      @mutex.synchronize { @data[pipeline_key] = pipeline }
+      @mutex.synchronize { @data[pipeline_key][:procedures] = [] }
       @queue << Proc.new { get_procedures(pipeline_key) }
     end
     def get_procedures(pipeline_key)
       LOG.debug "Getting procedure keys for pipeline #{pipeline_key}"
       @client.call(:get_procedures, pipeline_key: pipeline_key).each do |procedure|
         procedure_key = procedure[:procedure_key].to_sym
-        @data[pipeline_key][:procedures] << procedure_key
-        if !@data.include? procedure_key
+        @mutex.synchronize { @data[pipeline_key][:procedures] << procedure_key }
+        if claim_key procedure_key
           LOG.debug "Recording procedure #{procedure_key}"
-          @data[procedure_key] = procedure
+          @mutex.synchronize { @data[procedure_key] = procedure }
           @queue << Proc.new { get_parameters(procedure_key) }
         else
           LOG.debug "Already found procedure #{procedure_key}"
@@ -138,18 +140,18 @@ module IMPReSS
       end
     end
     def get_parameters(procedure_key)
-      @data[procedure_key][:parameters] = []
+      @mutex.synchronize { @data[procedure_key][:parameters] = [] }
       LOG.debug "Getting parameters for procedure #{procedure_key}"
       @client.call(:get_parameters, procedure_key: procedure_key).each do |parameter|
-        @data[procedure_key][:parameters] << parameter[:parameter_key].to_sym
+        @mutex.synchronize { @data[procedure_key][:parameters] << parameter[:parameter_key].to_sym }
         @queue << Proc.new { add_parameter(parameter) }
       end
     end
     def add_parameter(parameter)
       parameter_key = parameter[:parameter_key].to_sym
-      if !@data.include? parameter_key
+      if claim_key parameter_key
         LOG.debug "Recording parameter #{parameter_key}"
-        @data[parameter_key] = parameter
+        @mutex.synchronize { @data[parameter_key] = parameter }
         get_parameter_extra(parameter_key, :increments)
         get_parameter_extra(parameter_key, :options)
         get_parameter_extra(parameter_key, :mp_terms)
@@ -161,7 +163,15 @@ module IMPReSS
     def get_parameter_extra(parameter_key, name)
       @queue << Proc.new do
         LOG.debug "Getting #{name} for parameter #{parameter_key}"
-        @data[parameter_key][name] = @client.call(('get_parameter_'+name.to_s).to_sym, parameter_key: parameter_key)
+        value = @client.call(('get_parameter_'+name.to_s).to_sym, parameter_key: parameter_key)
+        @mutex.synchronize { @data[parameter_key][name] = value }
+      end
+    end
+    def claim_key(key)
+      @mutex.synchronize do
+        return false if @data.include? key
+        @data[key] = nil
+        return true
       end
     end
   end
