@@ -79,6 +79,7 @@ module IMPReSS
     def initialize()
       @data = {}
       @client = nil
+      @queue = Queue.new
     end
     def update()
       @data = {}
@@ -91,7 +92,7 @@ module IMPReSS
       end
       LOG.info "Proceeding to download updated IMPReSS database"
       LOG.debug @client.operations
-      get_pipelines()
+      download()
       when_last_modified = @client.call(:get_when_last_modified)[0]
       if when_last_modified == @data[:when_last_modified]
         File.new(jsonfilename, 'w').write(JSON::pretty_generate(@data))
@@ -102,15 +103,24 @@ module IMPReSS
       end
       LOG.info "IMPReSS database download complete"
     end
+    def download()
+      @queue << Proc.new { get_pipelines() }
+      while !@queue.empty?
+        task = @queue.pop
+        task.call
+      end
+    end
     def get_pipelines()
+      LOG.debug "Getting pipeline keys"
       @client.call(:get_pipeline_keys).each do |k|
-        get_pipeline(k.to_sym)
+        @queue << Proc.new { get_pipeline(k.to_sym) }
       end
     end
     def get_pipeline(pipeline_key)
+      LOG.debug "Getting pipeline #{pipeline_key}"
       @data[pipeline_key] = @client.call(:get_pipeline, pipeline_key: pipeline_key)[0]
       @data[pipeline_key][:procedures] = []
-      get_procedures(pipeline_key)
+      @queue << Proc.new { get_procedures(pipeline_key) }
     end
     def get_procedures(pipeline_key)
       LOG.debug "Getting procedure keys for pipeline #{pipeline_key}"
@@ -120,7 +130,7 @@ module IMPReSS
         if !@data.include? procedure_key
           LOG.debug "Recording procedure #{procedure_key}"
           @data[procedure_key] = procedure
-          get_parameters(procedure_key)
+          @queue << Proc.new { get_parameters(procedure_key) }
         else
           LOG.debug "Already found procedure #{procedure_key}"
         end
@@ -128,20 +138,25 @@ module IMPReSS
     end
     def get_parameters(procedure_key)
       @data[procedure_key][:parameters] = []
+      LOG.debug "Getting parameters for procedure #{procedure_key}"
       @client.call(:get_parameters, procedure_key: procedure_key).each do |parameter|
         @data[procedure_key][:parameters] << parameter[:parameter_key].to_sym
-        add_parameter(parameter)
+        @queue << Proc.new { add_parameter(parameter) }
       end
     end
     def add_parameter(parameter)
       parameter_key = parameter[:parameter_key].to_sym
       if !@data.include? parameter_key
         LOG.debug "Recording parameter #{parameter_key}"
-        parameter[:increments] = @client.call(:get_parameter_increments, parameter_key: parameter_key)
-        parameter[:options] = @client.call(:get_parameter_options, parameter_key: parameter_key)
-        parameter[:mp_terms] = @client.call(:get_parameter_mp_terms, parameter_key: parameter_key)
-        parameter[:eq_terms] = @client.call(:get_parameter_eq_terms, parameter_key: parameter_key)
         @data[parameter_key] = parameter
+        LOG.debug "Getting increments for parameter #{parameter_key}"
+        @queue << Proc.new { @data[parameter_key][:increments] = @client.call(:get_parameter_increments, parameter_key: parameter_key) }
+        LOG.debug "Getting options for parameter #{parameter_key}"
+        @queue << Proc.new { @data[parameter_key][:options] = @client.call(:get_parameter_options, parameter_key: parameter_key) }
+        LOG.debug "Getting mp terms for parameter #{parameter_key}"
+        @queue << Proc.new { @data[parameter_key][:mp_terms] = @client.call(:get_parameter_mp_terms, parameter_key: parameter_key) }
+        LOG.debug "Getting eq terms for parameter #{parameter_key}"
+        @queue << Proc.new { @data[parameter_key][:eq_terms] = @client.call(:get_parameter_eq_terms, parameter_key: parameter_key) }
       else
         LOG.debug "Already found parameter #{parameter_key}"
       end
