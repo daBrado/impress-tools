@@ -58,7 +58,7 @@ module IMPReSS
   RECHECK_INTERVAL = 360
   RETRY_INTERVAL = 10
   LOG = Logger.new STDERR
-  LOG.level = Logger::INFO
+  LOG.level = Logger::DEBUG
 
   class Client < Savon::Client
     def call(cmd, message=nil)
@@ -69,6 +69,7 @@ module IMPReSS
         rescue Savon::HTTPError => e
           LOG.warn "Got HTTP Error #{e}; retrying in #{RETRY_INTERVAL} seconds"
           sleep RETRY_INTERVAL
+          LOG.warn "Retrying SOAP call"
         end
       end
       return response.doc.collapse
@@ -149,16 +150,18 @@ module IMPReSS
       if !@data.include? parameter_key
         LOG.debug "Recording parameter #{parameter_key}"
         @data[parameter_key] = parameter
-        LOG.debug "Getting increments for parameter #{parameter_key}"
-        @queue << Proc.new { @data[parameter_key][:increments] = @client.call(:get_parameter_increments, parameter_key: parameter_key) }
-        LOG.debug "Getting options for parameter #{parameter_key}"
-        @queue << Proc.new { @data[parameter_key][:options] = @client.call(:get_parameter_options, parameter_key: parameter_key) }
-        LOG.debug "Getting mp terms for parameter #{parameter_key}"
-        @queue << Proc.new { @data[parameter_key][:mp_terms] = @client.call(:get_parameter_mp_terms, parameter_key: parameter_key) }
-        LOG.debug "Getting eq terms for parameter #{parameter_key}"
-        @queue << Proc.new { @data[parameter_key][:eq_terms] = @client.call(:get_parameter_eq_terms, parameter_key: parameter_key) }
+        get_parameter_extra(parameter_key, :increments)
+        get_parameter_extra(parameter_key, :options)
+        get_parameter_extra(parameter_key, :mp_terms)
+        get_parameter_extra(parameter_key, :eq_terms)
       else
         LOG.debug "Already found parameter #{parameter_key}"
+      end
+    end
+    def get_parameter_extra(parameter_key, name)
+      @queue << Proc.new do
+        LOG.debug "Getting #{name} for parameter #{parameter_key}"
+        @data[parameter_key][name] = @client.call(('get_parameter_'+name.to_s).to_sym, parameter_key: parameter_key)
       end
     end
   end
