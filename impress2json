@@ -188,6 +188,7 @@ module IMPReSS
         get_parameter_extra(parameter_key, :options)
         get_parameter_extra(parameter_key, :mp_terms)
         get_parameter_extra(parameter_key, :eq_terms)
+        get_parameter_extra(parameter_key, :ontology_options)
       else
         LOG.debug "Already found parameter #{parameter_key}"
       end
