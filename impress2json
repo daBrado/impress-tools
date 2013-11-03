@@ -35,7 +35,7 @@ HTTPI.logger = SAVON_LOG
 module Nokogiri
   module XML
     class Node
-      def content_value()
+      def content_value
         if self.content.empty?
           return nil
         elsif self.content == 'false'
@@ -46,11 +46,11 @@ module Nokogiri
           return self.content
         end
       end
-      def collapse()
+      def collapse
         result = inner_collapse
         return result ? (result.kind_of?(Array) ? result : [result]) : []
       end
-      def inner_collapse()
+      def inner_collapse
         case element_children.size
         when 0
           return self.content_value
@@ -95,38 +95,44 @@ module IMPReSS
     end
   end
 
-  class DatabaseDownloader
-    def initialize()
-      @data = {}
+  class Database
+    def initialize
+      @data = (File.exists? json_filename) ? JSON.parse(File.read(json_filename), symbolize_names: true) : {}
       @client = IMPReSS::Client.new
       @tasks = Queue.new
       @threads = []
       @mutex = Mutex.new
     end
-    def uptodate?()
-      return File.exists? json_filename @client.call(:get_when_last_modified)[0]
+    def check?
+      return @data[:when_last_modified] && @data[:when_last_modified] == @client.call(:get_when_last_modified)[0]
     end
-    def json_filename(date=nil)
-      date = @data[:when_last_modified] if !date
-      return "impress.#{date}.json"
-    end
-    def download(max_tasks: 20)
-      LOG.info "Downloading IMPReSS database"
-      LOG.debug @client.operations
-      @data = {}
-      @data[:when_last_modified] = @client.call(:get_when_last_modified)[0]
-      @tasks << Proc.new { get_pipelines() }
-      Array.new(max_tasks) { Thread.new { handle_tasks } }.each { |t| t.join }
-      if @client.call(:get_when_last_modified)[0] == @data[:when_last_modified]
-        File.new(json_filename, 'w').write(JSON::pretty_generate(@data))
-        File.unlink "impress.json" if File.symlink? "impress.json"
-        File.symlink(json_filename, "impress.json") if !File.exists? "impress.json"
+    def json_filename(dated: false)
+      if dated
+        return "impress.#{@data[:when_last_modified]}.json"
       else
-        LOG.error "Aborting; database was modified while we were downloading it"
+        return "impress.json"
       end
-      LOG.info "IMPReSS database download complete"
     end
-    def handle_tasks()
+    def update(max_tasks: 20)
+      LOG.debug @client.operations
+      until (timestamp = @client.call(:get_when_last_modified)[0]) == @data[:when_last_modified]
+        LOG.info "Local IMPReSS database is out of date"
+        @data = {}
+        @data[:when_last_modified] = timestamp
+        @tasks << Proc.new { get_pipelines() }
+        LOG.info "Downloading IMPReSS database"
+        Array.new(max_tasks) { Thread.new { handle_tasks } }.each { |t| t.join }
+        LOG.info "IMPReSS database download complete"
+      end
+      save
+      LOG.info "Local IMPReSS database is up to date"
+    end
+    def save
+      File.new(json_filename(dated: true), 'w').write(JSON::pretty_generate(@data))
+      File.unlink json_filename if File.symlink? json_filename
+      File.symlink(json_filename(dated: true), json_filename) if !File.exists? json_filename
+    end
+    def handle_tasks
       LOG.debug "Handle tasks"; n=0
       @mutex.synchronize { @threads << Thread.current }
       until @tasks.empty? && @tasks.num_waiting == @threads.count { |t| t != Thread.current && t.alive? }
@@ -138,7 +144,7 @@ module IMPReSS
       @tasks << nil
       LOG.debug "Handled #{n} tasks"
     end
-    def get_pipelines()
+    def get_pipelines
       LOG.debug "Getting pipeline keys"
       @client.call(:get_pipeline_keys).each do |k|
         @tasks << Proc.new { get_pipeline(k.to_sym) }
@@ -202,8 +208,8 @@ module IMPReSS
     end
   end
 
-  def uptodate?()
-    if DatabaseDownloader.new.uptodate?
+  def check?
+    if Database.new.check?
       LOG.info "Local IMPReSS database is up to date"
       return 0
     else
@@ -212,36 +218,27 @@ module IMPReSS
     end
   end
 
-  def download()
-    DatabaseDownloader.new.download
-  end
-
-  def update()
-    if DatabaseDownloader.new.uptodate?
-      LOG.info "IMPReSS database is already up to date"
-    else
-      DatabaseDownloader.new.download
-    end
+  def update
+    Database.new.update
   end
 
   def daemon(interval: 360)
+    db = Database.new
     while true
-      update()
-      LOG.info "Waiting for #{interval} seconds before checking again"
+      db.update
+      LOG.info "Checking again in #{interval} seconds"
       sleep interval
     end
   end
 end
 
 case ARGV[0]
-when "uptodate"
-  IMPReSS::uptodate?
-when "download"
-  IMPReSS::download
+when "check"
+  IMPReSS::check?
 when "update"
   IMPReSS::update
 when "daemon"
   IMPReSS::daemon
 else
-  STDERR.puts "Usage: #{$0} [--short] [--debug] < uptodate | download | update | daemon >"
+  STDERR.puts "Usage: #{$0} [--short] [--debug] < check | update | daemon >"
 end
