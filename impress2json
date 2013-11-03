@@ -4,9 +4,30 @@ require 'logger'
 require 'savon'
 require 'json'
 
-LOG_FORMATTER = Proc.new { |sev,d,p,msg| "#{DateTime.now.strftime('%F %T')} #{Process::pid} #{Thread::current.object_id.to_s(16)} #{sev}: #{msg}\n" }
+while ARGV[0] && ARGV[0][0,2] == "--"
+  case ARGV.shift
+  when "--short"
+    LOG_SHORT = true
+  when "--debug"
+    LOG_LEVEL = Logger::DEBUG
+  else
+    ARGV.clear
+  end
+end
+LOG_SHORT = false if !defined? LOG_SHORT
+LOG_LEVEL = Logger::INFO if !defined? LOG_LEVEL
 
-SAVON_LOG = Logger.new(STDERR)
+LOG_FORMATTER = Proc.new do |sev,d,p,msg|
+  entry = []
+  entry << DateTime.now.strftime('%F %T') if !LOG_SHORT
+  entry << "[#{Process::pid}]" if !LOG_SHORT
+  entry << "<#{Thread::current.object_id.to_s(16)}>" if Thread::main != Thread::current
+  entry << "#{sev}:" if !LOG_SHORT
+  entry << "#{msg}\n"
+  entry.join(' ')
+end
+
+SAVON_LOG = Logger.new STDERR
 SAVON_LOG.level = Logger::WARN
 SAVON_LOG.formatter = LOG_FORMATTER
 HTTPI.logger = SAVON_LOG
@@ -56,21 +77,19 @@ end
 module IMPReSS
   extend self
   WSDL = "https://www.mousephenotype.org/impress/soap/server?wsdl"
-  MAX_TASKS = 20
-  RECHECK_INTERVAL = 360
-  RETRY_INTERVAL = 10
   LOG = Logger.new STDERR
-  LOG.level = Logger::INFO
+  LOG.level = LOG_LEVEL
   LOG.formatter = LOG_FORMATTER
 
   class Client < Savon::Client
-    def initialize
+    def initialize(retry_interval: 10)
+      @retry_interval = retry_interval
       super(wsdl: WSDL, logger: SAVON_LOG, pretty_print_xml: true, raise_errors: false)
     end
     def call(cmd, message=nil)
       begin
         response = super(cmd, message: message)
-        sleep RETRY_INTERVAL if response.http_error?
+        sleep @retry_interval if response.http_error?
       end until response && !response.http_error?
       return response.doc.collapse
     end
@@ -91,13 +110,13 @@ module IMPReSS
       date = @data[:when_last_modified] if !date
       return "impress.#{date}.json"
     end
-    def download()
+    def download(max_tasks: 20)
       LOG.info "Downloading IMPReSS database"
       LOG.debug @client.operations
       @data = {}
       @data[:when_last_modified] = @client.call(:get_when_last_modified)[0]
       @tasks << Proc.new { get_pipelines() }
-      Array.new(MAX_TASKS) { Thread.new { handle_tasks } }.each { |t| t.join }
+      Array.new(max_tasks) { Thread.new { handle_tasks } }.each { |t| t.join }
       if @client.call(:get_when_last_modified)[0] == @data[:when_last_modified]
         File.new(json_filename, 'w').write(JSON::pretty_generate(@data))
         File.unlink "impress.json" if File.symlink? "impress.json"
@@ -205,11 +224,11 @@ module IMPReSS
     end
   end
 
-  def daemon()
+  def daemon(interval: 360)
     while true
       update()
-      LOG.info "Waiting for #{RECHECK_INTERVAL} seconds before checking again"
-      sleep RECHECK_INTERVAL
+      LOG.info "Waiting for #{interval} seconds before checking again"
+      sleep interval
     end
   end
 end
@@ -224,5 +243,5 @@ when "update"
 when "daemon"
   IMPReSS::daemon
 else
-  STDERR.puts "Usage: #{$0} uptodate | download | update | daemon"
+  STDERR.puts "Usage: #{$0} [--short] [--debug] < uptodate | download | update | daemon >"
 end
