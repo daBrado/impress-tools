@@ -5,7 +5,7 @@ Description=IMPReSS JSON Updater
 User=braden
 Group=braden
 WorkingDirectory=/home/braden/prj/impress-tools
-ExecStart=/home/braden/prj/impress-tools/impress2json daemon
+ExecStart=/home/braden/prj/impress-tools/impress2json --short daemon
 
 [Install]
 WantedBy=multi-user.target
