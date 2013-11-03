@@ -1,13 +1,14 @@
 #!/usr/bin/env ruby
 
-$DEBUG=nil
-
 require 'logger'
 require 'savon'
 require 'json'
 
+LOG_FORMATTER = Proc.new { |sev,d,p,msg| "#{DateTime.now.strftime('%F %T')} #{Process::pid} #{Thread::current.object_id.to_s(16)} #{sev}: #{msg}\n" }
+
 SAVON_LOG = Logger.new(STDERR)
 SAVON_LOG.level = Logger::WARN
+SAVON_LOG.formatter = LOG_FORMATTER
 HTTPI.logger = SAVON_LOG
 
 module Nokogiri
@@ -55,67 +56,73 @@ end
 module IMPReSS
   extend self
   WSDL = "https://www.mousephenotype.org/impress/soap/server?wsdl"
+  MAX_TASKS = 20
   RECHECK_INTERVAL = 360
   RETRY_INTERVAL = 10
   LOG = Logger.new STDERR
-  LOG.level = Logger::DEBUG
+  LOG.level = Logger::INFO
+  LOG.formatter = LOG_FORMATTER
 
   class Client < Savon::Client
+    def initialize
+      super(wsdl: WSDL, logger: SAVON_LOG, pretty_print_xml: true, raise_errors: false)
+    end
     def call(cmd, message=nil)
-      response = nil
-      while !response
-        begin
-          response = super(cmd, message: message)
-        rescue Savon::HTTPError => e
-          LOG.warn "Got HTTP Error #{e}; retrying in #{RETRY_INTERVAL} seconds"
-          sleep RETRY_INTERVAL
-          LOG.warn "Retrying SOAP call"
-        end
-      end
+      begin
+        response = super(cmd, message: message)
+        sleep RETRY_INTERVAL if response.http_error?
+      end until response && !response.http_error?
       return response.doc.collapse
     end
   end
 
-  class Database
+  class DatabaseDownloader
     def initialize()
       @data = {}
-      @client = nil
-      @queue = Queue.new
+      @client = IMPReSS::Client.new
+      @tasks = Queue.new
+      @threads = []
       @mutex = Mutex.new
     end
-    def update()
-      @data = {}
-      @client = IMPReSS::Client.new(wsdl: WSDL, logger: SAVON_LOG, pretty_print_xml: true)
-      @data[:when_last_modified] = @client.call(:get_when_last_modified)[0]
-      jsonfilename = "impress.#{@data[:when_last_modified]}.json"
-      if File.exists? jsonfilename
-        LOG.info "JSON file for current version (#{@data[:when_last_modified]}) already exists; no update needed"
-        return
-      end
-      LOG.info "Proceeding to download updated IMPReSS database"
+    def uptodate?()
+      return File.exists? json_filename @client.call(:get_when_last_modified)[0]
+    end
+    def json_filename(date=nil)
+      date = @data[:when_last_modified] if !date
+      return "impress.#{date}.json"
+    end
+    def download()
+      LOG.info "Downloading IMPReSS database"
       LOG.debug @client.operations
-      download()
-      when_last_modified = @client.call(:get_when_last_modified)[0]
-      if when_last_modified == @data[:when_last_modified]
-        File.new(jsonfilename, 'w').write(JSON::pretty_generate(@data))
+      @data = {}
+      @data[:when_last_modified] = @client.call(:get_when_last_modified)[0]
+      @tasks << Proc.new { get_pipelines() }
+      Array.new(MAX_TASKS) { Thread.new { handle_tasks } }.each { |t| t.join }
+      if @client.call(:get_when_last_modified)[0] == @data[:when_last_modified]
+        File.new(json_filename, 'w').write(JSON::pretty_generate(@data))
         File.unlink "impress.json" if File.symlink? "impress.json"
-        File.symlink(jsonfilename, "impress.json") if !File.exists? "impress.json"
+        File.symlink(json_filename, "impress.json") if !File.exists? "impress.json"
       else
-        LOG.error "Database was modified while we downloaded it! Aborting."
+        LOG.error "Aborting; database was modified while we were downloading it"
       end
       LOG.info "IMPReSS database download complete"
     end
-    def download()
-      @queue << Proc.new { get_pipelines() }
-      while !@queue.empty?
-        task = @queue.pop
-        task.call
+    def handle_tasks()
+      LOG.debug "Handle tasks"; n=0
+      @mutex.synchronize { @threads << Thread.current }
+      until @tasks.empty? && @tasks.num_waiting == @threads.count { |t| t != Thread.current && t.alive? }
+        task = @tasks.pop
+        task.call if task
+        n+=1 if task
       end
+      @mutex.synchronize { @threads.delete Thread.current }
+      @tasks << nil
+      LOG.debug "Handled #{n} tasks"
     end
     def get_pipelines()
       LOG.debug "Getting pipeline keys"
       @client.call(:get_pipeline_keys).each do |k|
-        @queue << Proc.new { get_pipeline(k.to_sym) }
+        @tasks << Proc.new { get_pipeline(k.to_sym) }
       end
     end
     def get_pipeline(pipeline_key)
@@ -123,7 +130,7 @@ module IMPReSS
       pipeline = @client.call(:get_pipeline, pipeline_key: pipeline_key)[0]
       @mutex.synchronize { @data[pipeline_key] = pipeline }
       @mutex.synchronize { @data[pipeline_key][:procedures] = [] }
-      @queue << Proc.new { get_procedures(pipeline_key) }
+      @tasks << Proc.new { get_procedures(pipeline_key) }
     end
     def get_procedures(pipeline_key)
       LOG.debug "Getting procedure keys for pipeline #{pipeline_key}"
@@ -133,7 +140,7 @@ module IMPReSS
         if claim_key procedure_key
           LOG.debug "Recording procedure #{procedure_key}"
           @mutex.synchronize { @data[procedure_key] = procedure }
-          @queue << Proc.new { get_parameters(procedure_key) }
+          @tasks << Proc.new { get_parameters(procedure_key) }
         else
           LOG.debug "Already found procedure #{procedure_key}"
         end
@@ -144,7 +151,7 @@ module IMPReSS
       LOG.debug "Getting parameters for procedure #{procedure_key}"
       @client.call(:get_parameters, procedure_key: procedure_key).each do |parameter|
         @mutex.synchronize { @data[procedure_key][:parameters] << parameter[:parameter_key].to_sym }
-        @queue << Proc.new { add_parameter(parameter) }
+        @tasks << Proc.new { add_parameter(parameter) }
       end
     end
     def add_parameter(parameter)
@@ -161,7 +168,7 @@ module IMPReSS
       end
     end
     def get_parameter_extra(parameter_key, name)
-      @queue << Proc.new do
+      @tasks << Proc.new do
         LOG.debug "Getting #{name} for parameter #{parameter_key}"
         value = @client.call(('get_parameter_'+name.to_s).to_sym, parameter_key: parameter_key)
         @mutex.synchronize { @data[parameter_key][name] = value }
@@ -176,8 +183,26 @@ module IMPReSS
     end
   end
 
+  def uptodate?()
+    if DatabaseDownloader.new.uptodate?
+      LOG.info "Local IMPReSS database is up to date"
+      return 0
+    else
+      LOG.info "Local IMPReSS database is out of date"
+      return 1
+    end
+  end
+
+  def download()
+    DatabaseDownloader.new.download
+  end
+
   def update()
-    Database.new.update()
+    if DatabaseDownloader.new.uptodate?
+      LOG.info "IMPReSS database is already up to date"
+    else
+      DatabaseDownloader.new.download
+    end
   end
 
   def daemon()
@@ -190,10 +215,14 @@ module IMPReSS
 end
 
 case ARGV[0]
+when "uptodate"
+  IMPReSS::uptodate?
+when "download"
+  IMPReSS::download
 when "update"
   IMPReSS::update
 when "daemon"
   IMPReSS::daemon
 else
-  STDERR.puts "Usage: #{$0} update | daemon"
+  STDERR.puts "Usage: #{$0} uptodate | download | update | daemon"
 end
