@@ -176,29 +176,24 @@ module IMPReSS
       LOG.debug "Getting parameters for procedure #{procedure_key}"
       @client.call(:get_parameters, procedure_key: procedure_key).each do |parameter|
         @mutex.synchronize { @data[procedure_key][:parameters] << parameter[:parameter_key].to_sym }
-        @tasks << Proc.new { add_parameter(parameter) }
-      end
-    end
-    def add_parameter(parameter)
-      parameter_key = parameter[:parameter_key].to_sym
-      if claim_key parameter_key
-        LOG.debug "Recording parameter #{parameter_key}"
-        @mutex.synchronize { @data[parameter_key] = parameter }
-        get_parameter_extra(parameter_key, :increments)
-        get_parameter_extra(parameter_key, :options)
-        get_parameter_extra(parameter_key, :mp_terms)
-        get_parameter_extra(parameter_key, :eq_terms)
-        get_parameter_extra(parameter_key, :ontology_options)
-      else
-        LOG.debug "Already found parameter #{parameter_key}"
+        parameter_key = parameter[:parameter_key].to_sym
+        if claim_key parameter_key
+          LOG.debug "Recording parameter #{parameter_key}"
+          @mutex.synchronize { @data[parameter_key] = parameter }
+          @tasks << Proc.new { get_parameter_extra(parameter_key, :increments) }
+          @tasks << Proc.new { get_parameter_extra(parameter_key, :options) }
+          @tasks << Proc.new { get_parameter_extra(parameter_key, :mp_terms) }
+          @tasks << Proc.new { get_parameter_extra(parameter_key, :eq_terms) }
+          @tasks << Proc.new { get_parameter_extra(parameter_key, :ontology_options) }
+        else
+          LOG.debug "Already found parameter #{parameter_key}"
+        end
       end
     end
     def get_parameter_extra(parameter_key, name)
-      @tasks << Proc.new do
-        LOG.debug "Getting #{name} for parameter #{parameter_key}"
-        value = @client.call(('get_parameter_'+name.to_s).to_sym, parameter_key: parameter_key)
-        @mutex.synchronize { @data[parameter_key][name] = value }
-      end
+      LOG.debug "Getting #{name} for parameter #{parameter_key}"
+      value = @client.call(('get_parameter_'+name.to_s).to_sym, parameter_key: parameter_key)
+      @mutex.synchronize { @data[parameter_key][name] = value }
     end
     def claim_key(key)
       @mutex.synchronize do
