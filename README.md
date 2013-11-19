@@ -1,9 +1,11 @@
 # IMPReSS Tools
 
-`impress2json` will download the entire IMPReSS database and dump it as a json document with a timestamp of the IMPReSS database's last modified time.
+`impress2json` will download the entire IMPReSS database and output to a timestamped json document, and symlink to it with a generic name.
 
-If there already exists a json document with the same timestamp, then the download will not continue, thus making the script suitable for cron jobs.
+If such a file already exists and is up to date, it will exit without downloading.
 
-Braden has it running on his local machine, and you access it via http://mbp.dabrado.net/data/impress.json
+If such a file already exists and is out of date, the current database will be downloaded, and the symlink will be updated.
 
-(On that machine it takes about 90 minutes to run, so if you only need the data, you might want to grab it from the above link.)
+It has a "daemon" mode to check for updates, thereby making it more friendly to be used in a system service.  An example systemd service is provided.
+
+Braden has it running on his local machine, and you access the output at http://mbp.dabrado.net/data/impress.json
