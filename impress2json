@@ -4,6 +4,9 @@ require 'logger'
 require 'savon'
 require 'json'
 
+MAX_TASKS = 20
+DAEMON_INTERVAL = 360
+
 while ARGV[0] && ARGV[0][0,2] == "--"
   case ARGV.shift
   when "--short"
@@ -113,7 +116,7 @@ module IMPReSS
         return "impress.json"
       end
     end
-    def update(max_tasks: 20)
+    def update(max_tasks: MAX_TASKS)
       LOG.debug @client.operations
       until (timestamp = @client.call(:get_when_last_modified)[0]) == @data[:when_last_modified]
         LOG.info "Local IMPReSS database is out of date"
@@ -218,7 +221,7 @@ module IMPReSS
     Database.new.update
   end
 
-  def daemon(interval: 360)
+  def daemon(interval: DAEMON_INTERVAL)
     db = Database.new
     while true
       db.update
